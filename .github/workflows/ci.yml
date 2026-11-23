@@ -1,0 +1,34 @@
+name: ci
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # amd64 runs vec's AVX2 assembly, arm64 its Go code.
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: CPU
+        run: |
+          uname -m
+          grep -m1 -E '^(model name|CPU part)' /proc/cpuinfo || true
+          echo "cpuinfo lines with avx2 and fma: $(grep -c -E '\bavx2\b.*\bfma\b|\bfma\b.*\bavx2\b' /proc/cpuinfo || true)"
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race ./...
+      # The Go code of the kernels on amd64 too: the hash tests hold on both paths.
+      - name: Tests without AVX2
+        if: runner.arch == 'X64'
+        run: GODEBUG=cpu.avx2=off go test ./...
+      - name: Benchmarks run once
+        run: go test -run '^$' -bench . -benchtime 1x ./...
