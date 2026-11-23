@@ -16,8 +16,9 @@ const hashRows, hashQueries, hashDim = 5000, 100, 50
 // The values come from a PCG stream through integer arithmetic, a square
 // root and a division, each exact or correctly rounded, so they are the
 // same on every platform. The generator of the other tests, clustered, goes
-// through NormFloat64, which calls math.Log and math.Exp: assembly on
-// amd64, Go elsewhere.
+// through NormFloat64, which calls math.Log and math.Exp; their code differs
+// between amd64 and arm64 (math.Log is assembly on amd64 and Go on arm64,
+// math.Exp has separate assembly on each).
 func hashVectors(rows, dim int) []float32 {
 	r := rand.NewPCG(1, 2)
 	out := make([]float32, rows*dim)
