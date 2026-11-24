@@ -52,10 +52,13 @@ func sha256Hex(b []byte) string {
 // changes results; the hashes are never updated to let a change pass.
 //
 // Hashed are the input vectors, WriteTo's output for a one-goroutine build,
-// and the hits of 100 queries at ef 10, 50, 100 and 400, and at ef 100 with
-// odd IDs skipped, which takes the other branch of searchLayer's stopping
-// rule. Each search asks for k = ef hits; a search for fewer runs the same
-// way and returns a prefix of them.
+// and the hits of 100 queries at ef 10, 50, 100 and 400; at ef 100 with odd
+// IDs skipped, a search with a skip function; and at ef 10 with only the 50
+// IDs divisible by 100 kept, where in 4 of the queries the nearest
+// candidate is farther than the farthest result before the results are
+// full, so searchLayer's stopping rule must go on until they are. Each
+// search asks for k = ef hits; a search for fewer runs the same way and
+// returns a prefix of them.
 //
 // The values hold on amd64 with vec.Dot32 in AVX2 assembly and in Go
 // (GODEBUG=cpu.avx2=off), and on arm64.
@@ -91,6 +94,7 @@ func TestFirstVersionHashes(t *testing.T) {
 		{"ef 100", 100, nil, "70133f94925d8462bc0fa77f10c31a6ebc92c801694741cc400f8c651fbb14a6"},
 		{"ef 400", 400, nil, "927e126939028b9212f445a9020209193d2fa9c2f5d15b02bceb21a764f2dba7"},
 		{"ef 100, odd IDs skipped", 100, oddIDs, "e1d19f1e00e9a948ff9f74638ee411c71cf437788f2494598173b9d3ec079119"},
+		{"ef 10, IDs divisible by 100 kept", 10, func(id int32) bool { return id%100 != 0 }, "36be4fa0c952f25b74b9563edf321559ea54f6154b08a3f1650140511ed57ce0"},
 	} {
 		var b []byte
 		for i := range hashQueries {
