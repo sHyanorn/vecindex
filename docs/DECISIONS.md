@@ -1,0 +1,53 @@
+# Decisions
+
+Comments in the code name recserve's decisions by recserve's numbers. D002 to D004 restate those decisions here and carry the numbers in their titles.
+
+## D001 The first version is recserve's hnsw and vec at 35a47a2
+- Date: 2026-11-23
+- Decision: The module holds two packages, `hnsw` and `vec`. In v0.1.0 they are `internal/hnsw` and `internal/vec` of github.com/sHyanorn/recserve at commit 35a47a2fb45eda83d71887f34b8914b6041b10ce, unchanged except for the import path of `vec` and the package comment of `hnsw`, under the MIT license and copyright holder of recserve. Later versions add functions and formats beside the existing ones; the float32 search and the file format of v0.1.0 stay bit for bit; the hash test of D006 checks this on one configuration
+- Rationale: recserve and retrieval-lab both use these packages. Go does not let another module import a package under `internal/`, so retrieval-lab held a copy. A module of their own gives both one version to import, each at a pinned version (retrieval-lab D024). Copying the packages unchanged keeps the first version comparable with its source byte for byte
+- Alternatives: recserve making the packages importable (every change would go through recserve, and retrieval-lab's go directive would rise to recserve's 1.27.4); two copies with a CI check of their difference (what is added later would exist in one copy only)
+- Limits: v0.1.0 keeps recserve's names: the file starts with `recserve-hnsw-1\n`, `vec` speaks of items, `vec.Matrix.TopK` starts at ID 1 because recserve reserves row 0, and a comment in `vec/dot_bench_test.go` names recserve's `scripts/bench-compare.sh`, which this repository does not have
+
+## D002 HNSW as the paper defines it, with hnswlib's and faiss's choices recorded (recserve D016 and D024)
+- Date: 2026-11-09 in recserve; restated 2026-11-23
+- Decision: `hnsw` implements Algorithms 1, 2, 4 and 5 of Malkov and Yashunin (arXiv:1603.09320). Sources read in recserve: the paper, hnswlib `hnswalg.h` at commit ca42672 (by the paper's first author) and faiss v1.15.1. The choices:
+  1. Level multiplier mL = 1/ln M; at most M links per node on layers 1 and up and 2M on layer 0; a query searches layer 0 with max(ef, k) candidates (paper, hnswlib)
+  2. A new node selects M neighbors on every layer it lives on (paper, hnswlib); faiss selects up to the layer's maximum
+  3. Neighbors are always selected with the heuristic of Algorithm 4, also when there are fewer candidates than the target; hnswlib and faiss keep all candidates then
+  4. A candidate is rejected when a selected neighbor is strictly closer to it than the new node is; ties keep it (hnswlib, faiss)
+  5. A list that would overflow selects again from its links and the new one with the same heuristic, down to the maximum (paper, hnswlib); faiss prunes to 80% of the maximum
+  6. The search on the next layer down starts from all nodes found on the layer above (paper: ep ← W); hnswlib starts from the closest selected neighbor, faiss from the one node of the greedy descent
+  7. The paper's options extendCandidates and keepPrunedConnections are off, as in hnswlib
+  8. Layer search is Algorithm 2 with hnswlib's stopping rule: stop when the nearest unexpanded candidate is farther than the farthest result and the results are full. A skip function keeps nodes out of the results but not out of the traversal
+  9. Visited nodes are marked with epoch tags in a per-searcher array, which is cleared only when the epoch counter wraps
+  10. Levels are drawn up front from a seeded generator and nodes are inserted in ID order, so a one-goroutine build is reproducible. A parallel build follows hnswlib: one lock per node and a global lock while a node above the top level is inserted; faiss builds in batches against a frozen snapshot
+  11. Similarity is the float32 inner product `vec.Dot32`, the distance its negative; on unit vectors the order equals cosine's
+  12. No pointers: the vectors are the caller's float32 array; layer-0 links are one int32 array of 1 + 2M slots per node, the first holding the count; links above are one int32 array of M + 1 slots per node and layer, found through a per-node offset; levels are bytes
+- Rationale: in recserve, coder/hnsw v0.6.1 reached recall@100 of at most 0.064, while faiss reached 1.000 on recserve's synthetic set with the same settings; its layer search keeps only k results and its graph prunes neighbors by distance alone. The paper fixes the algorithm and hnswlib is its reference implementation; the index departs from hnswlib only in points 3 and 6, where the paper is explicit. faiss's differences (points 2, 5 and 10) are recorded as possible reasons for a different recall at equal settings
+- Alternatives: faiss's batch build (reproducible in parallel, but a larger builder and not the classic algorithm); keepPrunedConnections (off in both reference implementations); faiss through cgo (a native library)
+
+## D003 vec.Dot sums in a fixed order (recserve D053)
+- Date: 2026-11-11 in recserve; restated 2026-11-23
+- Decision: `Dot`, the float64 inner product of two float32 vectors, adds its products in one order: 16 partial sums over the full blocks of 16 elements, the first 4 also over the remaining blocks of 4; then per lane l of four, (s_l + s_4+l) + (s_8+l + s_12+l); then the lanes as (l0 + l2) + (l1 + l3); then the remaining elements one at a time. On amd64 with AVX2 and FMA (`golang.org/x/sys/cpu`) assembly runs it with fused multiply-adds; elsewhere Go code does the same additions
+- Rationale: a product of two float32 values is exact in float64, so a fused and a separate multiply-add round alike, and the assembly and the Go code give the same result to the bit. Defining the order, not the assembly, keeps one result on every CPU
+- Tests: `Dot`, the Go code and the assembly each equal the definition written out element by element, to the bit, for lengths 0 to 300, and under `go test -fuzz` on random lengths and values; special values agree; the error is within n · 2^-53 times the sum of the products' magnitudes
+
+## D004 vec.Dot32 sums in a fixed order, without fused multiply-add (recserve D055)
+- Date: 2026-11-11 in recserve; restated 2026-11-23
+- Decision: `Dot32`, the float32 inner product the graph uses, rounds each product to float32 and adds the products in one order: 32 partial sums over the full blocks of 32 elements, the first 8 also over the remaining blocks of 8; then per lane l of 8, (s_l + s_8+l) + (s_16+l + s_24+l); then the lanes as ((l0 + l4) + (l2 + l6)) + ((l1 + l5) + (l3 + l7)); then the remaining elements one at a time. On amd64 with AVX2 and FMA assembly runs it with the multiply and the add as separate instructions; elsewhere Go code converts each product to float32, so that the compiler cannot fuse it with the addition
+- Rationale: a product of two float32 values is not exact in float32, so a fused multiply-add would round differently from a multiply and an add. Keeping them apart lets the Go code match the assembly on every CPU
+- Tests: as D003, with the error within γ_n = n u / (1 - n u), u = 2^-24, times the sum of the products' magnitudes
+- Alternatives: FMA in the assembly (Go has no float32 fused multiply-add, and doing it in float64 rounds twice, so the Go code could not match it to the bit); float64 accumulation as in `Dot` (half the lanes per instruction)
+
+## D005 go 1.27.3 and one dependency
+- Date: 2026-11-23
+- Decision: go.mod declares go 1.27.3 and requires golang.org/x/sys v0.48.0, which `vec/dot_amd64.go` imports for its CPU check
+- Rationale: 1.27.3 is retrieval-lab's go directive, so it imports the module without raising its own; recserve declares 1.27.4. CI installs the version go.mod names, so the hash tests run on the toolchain retrieval-lab builds with. x/sys v0.48.0 is the version both projects require
+- Alternatives: go 1.26.0, the lowest that builds (x/sys v0.48.0 requires it; the code needs 1.25 for `sync.WaitGroup.Go`); CI would then test a toolchain neither project uses
+
+## D006 Hash tests pin the first version
+- Date: 2026-11-23
+- Decision: `TestFirstVersionHashes` builds a graph over 5,000 vectors of 50 values with M 16, efConstruction 200, seed 1 and one goroutine, and asserts eight SHA-256 values: of the input (those vectors and 100 further ones used as queries), of `WriteTo`'s output, and of the hits of the 100 queries at ef 10, 50, 100 and 400, at ef 100 with odd IDs skipped, and at ef 10 with only the IDs divisible by 100 kept. A hit is hashed as its ID (uint32) and its score (float64 bits), little-endian. The values were taken with recserve's code at 35a47a2 and are never updated to let a change pass
+- Rationale: retrieval-lab D024 sets the one-goroutine build, the 100 queries and the four ef values; M 16 and efConstruction 200 are the settings both projects build with. The two cases with a skip function are this repository's addition, since retrieval-lab searches with one. With a skip function `searchLayer` does not stop when its nearest candidate is farther than its farthest result unless the results are full. With odd IDs skipped the results are always full by then, so that case pins a filtered search but not this rule. With one node in a hundred kept, 4 of the 100 queries reach that point with results still missing: with the rule reduced to the distance test alone this hash changes, and it is the only test of the package that fails. The vectors come from a PCG stream through integer arithmetic, a square root and a division, each exact or correctly rounded, so they are the same on every platform; the generator of the other tests goes through `math.Log` and `math.Exp`, whose code differs between amd64 and arm64 (`math.Log` is assembly on amd64 and Go on arm64). The build draws its levels through `math.Log` as well, as in recserve, so that the hashes agree on both architectures is what CI shows, not something the standard library promises. The input hash tells a change of input from a change of code. Each search asks for k = ef hits: a search for fewer takes the same path and returns a prefix of them, so one hash covers every k up to ef. 50 values per vector run all three stages of `Dot32` (blocks of 32, blocks of 8, single elements)
+- Limits: the values hold on amd64 with `Dot32` in assembly and in Go (GODEBUG=cpu.avx2=off), and on arm64. One size, dimension and configuration are pinned; a parallel build is not reproducible and is not pinned
