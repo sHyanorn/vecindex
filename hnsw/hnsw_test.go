@@ -5,11 +5,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 
 	"github.com/sHyanorn/vecindex/vec"
 )
@@ -164,7 +167,9 @@ func shared(t testing.TB, build func() (*Index, error)) *Index {
 
 const (
 	looseK, looseEf = 10, 40
-	minRecall       = 0.95 // see TestRecall
+	// The recall floor of checks, set from measurements on these datasets
+	// with margin: loose 1.000 at ef=40, tight 0.968 at ef=10.
+	minRecall = 0.95
 	// Pruning can remove every link to a node, so a few nodes may be
 	// unreachable (also in hnswlib and faiss); measured: 3 of 3,000 on
 	// tight, 0 to 16 of 10,000 on loose.
@@ -262,16 +267,6 @@ func TestExhaustiveSearchIsExact(t *testing.T) {
 			}
 		}
 	}
-}
-
-// The recall floor of the checks was set from measurements on these
-// datasets with margin: loose 1.000 at ef=40, tight 0.968 at ef=10.
-func TestRecall(t *testing.T) {
-	ix := looseIx(t)
-	for _, ef := range []int{10, 20, 40, 80} {
-		t.Logf("loose recall@%d ef=%d: %.4f", looseK, ef, loose.recall(ix, looseK, ef, false))
-	}
-	t.Logf("tight recall@10 ef=10: %.4f", tight.recall(tightIx(t), 10, 10, false))
 }
 
 func TestFilteredSearch(t *testing.T) {
@@ -450,5 +445,27 @@ func TestSaveAndRead(t *testing.T) {
 	}
 	if _, err := Read(bytes.NewReader(saved), loose.data[:len(loose.data)-loose.dim], loose.dim); err == nil {
 		t.Error("data of another size accepted")
+	}
+}
+
+// TestReadReportsReadErrors fails the reader before the magic and after the
+// graph: the error is the reader's, not a verdict on the file.
+func TestReadReportsReadErrors(t *testing.T) {
+	var buf bytes.Buffer
+	if _, err := looseIx(t).WriteTo(&buf); err != nil {
+		t.Fatal(err)
+	}
+	errRead := errors.New("disk failure")
+	for name, r := range map[string]io.Reader{
+		"before the magic": iotest.ErrReader(errRead),
+		"after the graph":  io.MultiReader(bytes.NewReader(buf.Bytes()), iotest.ErrReader(errRead)),
+	} {
+		if _, err := Read(r, loose.data, loose.dim); !errors.Is(err, errRead) {
+			t.Errorf("failing %s: got %v, want %v", name, err, errRead)
+		}
+	}
+	_, err := Read(bytes.NewReader(append([]byte("x"), buf.Bytes()[1:]...)), loose.data, loose.dim)
+	if err == nil || !strings.Contains(err.Error(), "magic") {
+		t.Errorf("wrong magic: got %v, want an error naming the magic", err)
 	}
 }
