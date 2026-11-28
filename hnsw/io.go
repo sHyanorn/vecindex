@@ -49,7 +49,7 @@ func (x *Index) write(w io.Writer, magic string, body []any) (int64, error) {
 }
 
 // newIndex checks the header that follows a magic against data and dim and
-// returns an index without link arrays.
+// returns an index without its arrays.
 func newIndex(head []int64, data []float32, dim int) (*Index, error) {
 	n, d, m, m0, efc, entry, top, nUpper := head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7]
 	// The row count is compared with the data's, not multiplied by dim: a
@@ -91,10 +91,11 @@ func Read(r io.Reader, data []float32, dim int) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	x.levels = make([]uint8, x.n)
-	x.links0 = make([]int32, x.n*(1+x.m0))
-	x.upperOff = make([]int32, x.n)
-	x.upper = make([]int32, head[7])
+	n, m0, nUpper := head[0], head[3], head[7]
+	x.levels = make([]uint8, n)
+	x.links0 = make([]int32, n*(1+m0))
+	x.upperOff = make([]int32, n)
+	x.upper = make([]int32, nUpper)
 	for _, v := range []any{x.levels, x.links0, x.upperOff, x.upper} {
 		if err := binary.Read(br, binary.LittleEndian, v); err != nil {
 			return nil, fmt.Errorf("hnsw: body: %w", err)
@@ -111,9 +112,11 @@ func Read(r io.Reader, data []float32, dim int) (*Index, error) {
 
 // View returns the graph in buf, as WriteAligned wrote it, attached to data,
 // the rows it was built over, dim values each. The index uses buf in place,
-// without copying: buf must stay unchanged while the index is in use, and
-// its first byte must lie at an address that is a multiple of 4, as in a
-// mapped file. The graph is checked before use, which reads all of buf.
+// without copying: buf must start at an address that is a multiple of 4, as
+// a mapped file does, and stay mapped and unchanged while the index is in
+// use. A mapped file that is truncated meanwhile crashes the process with
+// SIGBUS; replace a file by writing a new one and renaming it. The graph is
+// checked before use: Check reads the levels, the offsets and every list.
 func View(buf []byte, data []float32, dim int) (*Index, error) {
 	if binary.NativeEndian.Uint16([]byte{1, 0}) != 1 {
 		return nil, errors.New("hnsw: View needs a little-endian CPU")
@@ -135,25 +138,27 @@ func View(buf []byte, data []float32, dim int) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	// newIndex bounds n by the data and len(upper) by n, so these sums of
-	// sizes cannot wrap around.
-	n0, nOff, nUp := x.n*(1+x.m0), x.n, int(head[7])
+	// newIndex bounds n by the data, M and Mmax0 by 2^11 and len(upper) by
+	// n·31·2^10, so the size cannot wrap around in int64; once it equals
+	// len(buf), every count fits in an int.
+	n, n0, nUp := head[0], head[0]*(1+head[3]), head[7]
 	off := len(alignedMagic) + headerLen
-	if want := off + 4*(n0+nOff+nUp) + x.n; len(buf) != want {
+	if want := int64(off) + 4*(n0+n+nUp) + n; int64(len(buf)) != want {
 		return nil, fmt.Errorf("hnsw: aligned graph of %d bytes, want %d", len(buf), want)
 	}
-	x.links0, off = int32s(buf, off, n0)
-	x.upperOff, off = int32s(buf, off, nOff)
-	x.upper, off = int32s(buf, off, nUp)
+	x.links0, off = int32s(buf, off, int(n0))
+	x.upperOff, off = int32s(buf, off, int(n))
+	x.upper, off = int32s(buf, off, int(nUp))
 	x.levels = buf[off:]
 	return x.ready()
 }
 
 // int32s returns the n int32 at byte offset off of buf, in place, and the
-// offset after them.
+// offset after them; the caller has checked that buf holds them. With n 0,
+// off may be len(buf), where &buf[off] would panic.
 func int32s(buf []byte, off, n int) ([]int32, int) {
 	if n == 0 {
-		return []int32{}, off
+		return nil, off
 	}
 	return unsafe.Slice((*int32)(unsafe.Pointer(&buf[off])), n), off + 4*n
 }
