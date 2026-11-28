@@ -114,7 +114,7 @@ func Read(r io.Reader, data []float32, dim int) (*Index, error) {
 // the rows it was built over, dim values each. The index uses buf in place,
 // without copying: buf must start at an address that is a multiple of 4, as
 // a mapped file does, and stay mapped and unchanged while the index is in
-// use. A mapped file that is truncated meanwhile crashes the process with
+// use. A mapped file that is truncated meanwhile can crash the process with
 // SIGBUS; replace a file by writing a new one and renaming it. The graph is
 // checked before use: Check reads the levels, the offsets and every list.
 func View(buf []byte, data []float32, dim int) (*Index, error) {
